@@ -1,4 +1,4 @@
-# prefix-cache-lab
+# prefix-evict-lab
 
 **How much of prefix caching's prefill saving survives memory pressure, and which
 eviction policy keeps the most of it, for multi-turn agent and RAG workloads?**
@@ -98,8 +98,8 @@ Design notes:
 ## Quickstart
 
 ```bash
-git clone https://github.com/cininef/prefix-cache-lab
-cd prefix-cache-lab
+git clone https://github.com/cininef/prefix-evict-lab
+cd prefix-evict-lab
 pip install -e ".[dev]"
 pytest                                   # 19 tests
 python benchmarks/compare_policies.py    # one trace, several cache sizes
