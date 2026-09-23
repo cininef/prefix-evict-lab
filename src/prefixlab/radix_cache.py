@@ -21,6 +21,7 @@ class Node:
     ref_count: int = 0
     last_access: int = 0
     hit_count: int = 0
+    created: int = 0
 
 
 class RadixCache:
@@ -31,6 +32,7 @@ class RadixCache:
         self.root = Node(key=(), parent=None)
         self._clock = 0
         self.num_evictions = 0
+        self.eviction_ages: list[int] = []  # requests between insert and eviction
 
     def _chunks(self, tokens):
         bs = self.block_size
@@ -72,7 +74,7 @@ class RadixCache:
             if block is None:
                 break
             child = Node(key=chunk, parent=node, block=block, depth=node.depth + 1,
-                         last_access=self._clock)
+                         last_access=self._clock, created=self._clock)
             node.children[chunk] = child
             node = child
             added += 1
@@ -104,6 +106,7 @@ class RadixCache:
         del victim.parent.children[victim.key]
         self.allocator.free(victim.block)
         self.num_evictions += 1
+        self.eviction_ages.append(self._clock - victim.created)
         return True
 
     @property

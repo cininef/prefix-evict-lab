@@ -38,3 +38,11 @@ def test_tiny_cache_forces_evictions_and_lowers_hits():
     tiny = simulate(trace, RadixCache(4, 16, LRU()))
     assert tiny.evictions > 0
     assert tiny.token_hit_rate < big.token_hit_rate
+
+
+def test_eviction_ages_recorded_and_per_request_hits_sum():
+    trace = generate_trace(small_cfg(num_sessions=10))
+    res = simulate(trace, RadixCache(4, 16, LRU()))
+    assert len(res.eviction_ages) == res.evictions
+    assert sum(res.per_request_hit) == res.hit_tokens
+    assert all(a >= 0 for a in res.eviction_ages)
