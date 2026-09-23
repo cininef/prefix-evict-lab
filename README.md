@@ -115,73 +115,92 @@ class MyPolicy:
         return (node.hit_count, node.last_access)
 ```
 
-## Plan
+## What this project is trying to find out
 
-The full module map is in [docs/ROADMAP.md](docs/ROADMAP.md). Summary:
+Most prefix-cache work asks "how do we share a prefix?". This project asks the
+next question: **once sharing works, the pool fills up, and what you evict
+decides how much of the saving you keep.** Production systems mostly answer with
+LRU. LRU is a reasonable default, but the results above already show it is not
+best everywhere, and the gap to an oracle is large. The goal is to understand
+*why* a policy wins or loses on a given workload, and whether a policy that
+uses more of what a serving system knows can close part of the gap.
 
-| # | Milestone | Done when | Status |
-|---|---|---|---|
-| M0 | Cache core and simulator | tests pass, benchmark runs | done |
-| M1 | Rigorous simulation | multi-seed error bars, oracle bound, figure | done |
-| M2 | Real model, correctness | paged prefix-reuse generation matches HuggingFace greedy output token for token | next |
-| M3 | Latency ground truth | measured prefill time vs. cached-prefix length; fitted latency model | planned |
-| M4 | More workloads | RAG and agent traces below; check whether the M1 ranking holds | planned |
-| M5 | Better policy | a policy that beats LRU and LFU across sizes, or a documented failure | planned |
-| M6 | End-to-end TTFT | policies compared on the real model under a request stream | planned |
-| M7 | Write-up | results, limits, related work, negative results included | planned |
+Three ideas drive the design:
 
-### M2-M3: real model
+1. **Separate the mechanism from the policy.** The tree, pinning and allocator
+   are fixed; a policy is a single `priority(node, now)` function. That keeps
+   comparisons fair and makes new policies cheap to try.
+2. **Always compare against an upper bound.** A hit rate means little alone. The
+   Belady oracle says how much room is left, so "policy A beats B" and "policy A
+   is close to optimal" are different, checkable claims.
+3. **Do not trust hit rate as a proxy for latency.** A hit on a long, deep prefix
+   saves more prefill work than a hit on a short one. So the simulator is
+   calibrated against a real model before any TTFT claim is made.
 
-Wrap a small HuggingFace causal LM (for example Qwen2.5-0.5B) that runs on CPU or
-Apple MPS. Store per-block KV tensors in the pool, prefill only the uncached
-suffix of a prompt, and require token-for-token agreement with plain
-`generate()` under greedy decoding. Then measure prefill time as a function of
-cached-prefix length and total length, and fit a latency model so the simulator
-can report estimated TTFT and not only hit rate.
+The hypothesis I find most interesting, and could easily be wrong: **agents that
+call tools pause.** While a session waits for a tool result its KV blocks sit
+idle, yet it will resume soon and will need them. LRU sees "not touched
+recently" and evicts them; a policy that models expected resume time might not.
+Whether this matters in practice is exactly what the workload experiments are for.
 
-### M4: workloads beyond a single chat
+## How it gets built, step by step
 
-Hit rate depends heavily on the workload, so the ranking above must be re-tested:
+**Done: simulator and evaluation (M0-M1).** Pure Python 3.12 with dataclasses, no
+heavy dependencies, so it runs anywhere and tests in milliseconds. `pytest` for
+19 unit tests, `matplotlib` for figures, GitHub Actions for CI. The block-level
+prefix tree, three policies, a Belady oracle, a synthetic agent-trace generator
+and a multi-seed sweep are in place.
 
-- **RAG with popular documents.** A few documents are retrieved by many requests
-  (Zipf popularity). The shared prefix is the document, placed before the
-  question.
-- **Tool-calling agent loops (ReAct style).** A long system prompt plus tool
-  schemas, then many short turns. The KV cache of a paused agent sits idle while
-  it waits for a tool result. **Hypothesis to test:** eviction should use the
-  expected resume time of a session, not only past access, so a policy aware of
-  tool-call pauses should keep the right blocks. This is the main new idea in
-  the plan and it may turn out to be wrong.
-- **Branching agents and multi-agent systems.** One prefix forks into several
-  sub-tasks or several agents that share a large context and then diverge.
-- **Long-context coding agents.** A very long, slowly growing context per
-  session. Recompute cost is high, so cost-aware eviction should matter most here.
-- **Reasoning models.** Long decode phases hold KV blocks for a long time, which
-  shrinks the pool available to prefix caching.
-- **Real logs** (for example public chat or agent datasets) where usable, to
-  check that conclusions are not an artifact of the synthetic generator.
+**Next: put a real model behind the cache (M2).** PyTorch and HuggingFace
+`transformers` with a small causal LM (for example Qwen2.5-0.5B), on CPU or
+Apple MPS so no CUDA GPU is needed. The cache stores real per-block KV tensors,
+and a request prefills only the part of its prompt that is not cached. The
+correctness bar is strict: greedy output must match plain `generate()` token for
+token. Without this, any speed number would be measuring a bug.
 
-### M5: policies to try
+**Then: measure what a cached token is actually worth (M3).** Time prefill with
+`time.perf_counter` (plus device synchronization on MPS) across cached-prefix
+lengths and total lengths, and fit a small latency model with NumPy. The
+simulator can then report estimated TTFT, and cost-aware policies can use
+measured recompute cost instead of a guessed formula.
 
-Aging and LRU-2 style variants, ARC-style adaptive recency/frequency, cost-aware
-v2 (weight by measured recompute time and estimated reuse probability), and the
-pause-aware policy above. Ablate each signal: recency, frequency, depth, cost,
-expected resume time.
+**Then: widen the workloads (M4).** Trace generators built with NumPy (Zipf
+popularity via `numpy.random`) and, where usable, public chat or agent datasets
+loaded with HuggingFace `datasets`. Workloads to add: RAG with popular documents
+placed before the question; tool-calling agent loops with think-time pauses;
+branching and multi-agent systems that fork from one shared context;
+long-context coding agents; and reasoning models whose long decodes hold blocks
+and shrink the pool. The point is to test whether the LRU/LFU crossover seen
+today survives outside my own generator.
 
-### Related directions, not in scope yet
+**Then: try better policies (M5).** Pure Python again: aging and LRU-2 variants,
+ARC-style adaptive recency/frequency, cost-aware v2 using the M3 model, and the
+pause-aware policy above. Each signal (recency, frequency, depth, cost, expected
+resume time) gets an ablation so a win can be attributed.
 
-Tiered KV storage (offloading evicted blocks to CPU or disk instead of dropping
-them), non-prefix KV reuse for RAG chunks, prefix-aware request routing across
-replicas, and prefill/decode disaggregation. These change what "evict" means, so
-they are natural follow-ups.
+**Finally: end-to-end TTFT and write-up (M6-M7).** Replay a request stream
+against the real model under each policy and report measured TTFT, with negative
+results included. Compare behavior against SGLang RadixAttention and vLLM
+automatic prefix caching where that is feasible on the hardware available.
+
+The milestone table with completion criteria is in [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Deliberately out of scope for now
+
+These are real and active directions, but each changes what "evict" means, so
+they are follow-ups rather than part of this study: tiered KV storage (moving
+evicted blocks to CPU memory or disk instead of dropping them), non-prefix KV
+reuse for RAG chunks, prefix-aware request routing across replicas, and
+prefill/decode disaggregation.
 
 ## Related work
 
 - PagedAttention / vLLM (Kwon et al., 2023): paged KV blocks, automatic prefix caching.
 - RadixAttention / SGLang (Zheng et al., 2023): radix-tree prefix reuse with LRU eviction.
 - Belady's algorithm (1966): the offline optimal replacement policy, used here as the oracle.
-- Follow-up systems on KV reuse for RAG, KV tiering and prefix-aware scheduling exist;
-  the reference list will be added and checked in M7.
+- Later work on KV reuse for RAG, KV tiering and prefix-aware scheduling exists.
+  I have deliberately listed only the classic references I am sure of; the rest
+  will be added and verified in M7 rather than cited from memory.
 
 ## Limitations
 
