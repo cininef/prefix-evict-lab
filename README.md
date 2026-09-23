@@ -28,6 +28,10 @@ pytest
 python benchmarks/compare_policies.py
 ```
 
+![hit rate vs cache size](docs/hit_rate_vs_cache.png)
+
+Plan and module map: [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## Findings so far
 
 1. **Bug found via the benchmark.** The first run showed LFU and cost-aware far
@@ -39,12 +43,16 @@ python benchmarks/compare_policies.py
 2. **After the fix** the picture is mixed: LFU / cost-aware are slightly ahead at
    64-128 blocks (0.50 vs 0.40 at 64), LRU is ahead at 256+ blocks (0.81 vs 0.76
    at 512). The current cost-aware score is not yet better than LFU.
-   Single trace, single seed; no claims until multiple seeds and trace shapes.
+   Holds across 10 seeds (std <= 0.015), on one synthetic trace shape.
+3. **Headroom exists.** The Belady oracle beats the best online policy by up to
+   ~13 points at 128 blocks (0.705 vs 0.578), so a better policy is not ruled out.
+   The current cost-aware score adds nothing over LFU.
 
 ## Roadmap
 
 - [x] Diagnose LFU / cost-aware underperformance (unpinned fresh blocks)
-- [ ] Multiple seeds with confidence intervals; add aging or LRU-2 style variants
+- [x] Multiple seeds with error bars; Belady oracle bound
+- [ ] Aging / LRU-2 style variants
 - [ ] More trace shapes (RAG with shared documents, branching agents, Zipf popularity)
 - [ ] Compare against SGLang RadixAttention / vLLM prefix caching behavior
 - [ ] Real paged-KV engine with HF greedy parity check
