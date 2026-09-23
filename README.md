@@ -1,5 +1,10 @@
 # prefix-evict-lab
 
+[![tests](https://github.com/cininef/prefix-evict-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/cininef/prefix-evict-lab/actions/workflows/ci.yml)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![status](https://img.shields.io/badge/status-research%20prototype-orange)
+
 **How much of prefix caching's prefill saving survives memory pressure, and which
 eviction policy keeps the most of it, for multi-turn agent and RAG workloads?**
 
