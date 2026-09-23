@@ -28,18 +28,23 @@ pytest
 python benchmarks/compare_policies.py
 ```
 
-## First observation (not a conclusion)
+## Findings so far
 
-On the default trace (240 requests, block size 16) LRU beats LFU and the
-initial cost-aware score at every cache size where eviction happens. Likely
-cause: a freshly inserted tail block has `hit_count == 0`, so frequency-based
-policies evict it immediately and the working set of the active session thrashes.
-The cost-aware score inherits this. Next step is to confirm with per-request
-diagnostics and try recency-aware or aging variants before drawing conclusions.
+1. **Bug found via the benchmark.** The first run showed LFU and cost-aware far
+   below LRU (e.g. 0.28 / 0.09 vs 0.57 hit rate at 128 blocks). Cause: a request's
+   newly inserted blocks were not pinned, so frequency-based policies evicted
+   them (0 hits) while the same request was still inserting its remaining blocks,
+   leaving stale high-hit blocks in the pool. Pinning fresh blocks during insert
+   fixed it (regression test in `tests/test_radix_cache.py`).
+2. **After the fix** the picture is mixed: LFU / cost-aware are slightly ahead at
+   64-128 blocks (0.50 vs 0.40 at 64), LRU is ahead at 256+ blocks (0.81 vs 0.76
+   at 512). The current cost-aware score is not yet better than LFU.
+   Single trace, single seed; no claims until multiple seeds and trace shapes.
 
 ## Roadmap
 
-- [ ] Diagnose LFU / cost-aware underperformance; add aging or LRU-2 style variants
+- [x] Diagnose LFU / cost-aware underperformance (unpinned fresh blocks)
+- [ ] Multiple seeds with confidence intervals; add aging or LRU-2 style variants
 - [ ] More trace shapes (RAG with shared documents, branching agents, Zipf popularity)
 - [ ] Compare against SGLang RadixAttention / vLLM prefix caching behavior
 - [ ] Real paged-KV engine with HF greedy parity check

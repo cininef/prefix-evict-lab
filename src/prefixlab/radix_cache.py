@@ -69,6 +69,7 @@ class RadixCache:
         chunks = self._chunks(tokens)
         node = matched[-1] if matched else self.root
         added = 0
+        fresh: list[Node] = []  # pinned so this request cannot evict its own new blocks
         for chunk in chunks[len(matched) :]:
             block = self._allocate_block()
             if block is None:
@@ -76,8 +77,11 @@ class RadixCache:
             child = Node(key=chunk, parent=node, block=block, depth=node.depth + 1,
                          last_access=self._clock, created=self._clock)
             node.children[chunk] = child
+            child.ref_count += 1
+            fresh.append(child)
             node = child
             added += 1
+        self.unlock(fresh)
         return added
 
     def _allocate_block(self) -> int | None:

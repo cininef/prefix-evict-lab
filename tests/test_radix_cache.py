@@ -72,3 +72,13 @@ def test_lfu_keeps_frequently_hit_block():
     store(c, [5, 6])  # evicts [3,4] (fewer hits) even though [1,2] is older
     assert len(c.match_prefix([1, 2])) == 1
     assert len(c.match_prefix([3, 4])) == 0
+
+
+def test_insert_does_not_evict_its_own_new_blocks():
+    # Old block has many hits, so LFU would pick a fresh 0-hit leaf as victim.
+    c = make(num_blocks=3, policy=LFU())
+    store(c, [9, 9])
+    for _ in range(5):
+        store(c, [9, 9])
+    store(c, [1, 2, 3, 4, 5, 6])  # 3 blocks needed, only 2 free + [9,9] evictable
+    assert len(c.match_prefix([1, 2, 3, 4])) == 2  # its own leading blocks survived
