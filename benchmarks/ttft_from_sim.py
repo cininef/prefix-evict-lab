@@ -38,11 +38,14 @@ def main():
     names = list(POLICIES) + ["belady"]
     hit = {n: {b: [] for b in SIZES} for n in names}
     ttft = {n: {b: [] for b in SIZES} for n in names}
-    base = []
+    base, best = [], []
     for seed in SEEDS:
         trace = generate_trace(replace(TraceConfig(), seed=seed))
         nocache = st.mean(lm.ttft(0, len(t)) for t in trace)
         base.append(nocache)
+        # Every request served with all but its last block from cache (engine cap).
+        full = [(len(t) - 1) // BS * BS for t in trace]
+        best.append(st.mean(lm.ttft(c, len(t) - c) for t, c in zip(trace, full)) / nocache)
         for b in SIZES:
             for n in names:
                 pol = BeladyOracle(trace, BS) if n == "belady" else POLICIES[n]()
@@ -52,7 +55,7 @@ def main():
 
     print(f"no-cache mean TTFT: {st.mean(base) * 1e3:.1f} ms   ({lm.label})")
     print(f"best case, every request all-but-one-block cached (fixed cost / floor bound): "
-          f"{lm.ttft(1, 1) / st.mean(base):.0%} of no-cache\n")
+          f"{st.mean(best):.0%} of no-cache\n")
     print(f"{'blocks':>6}  " + "  ".join(f"{n:>22}" for n in names))
     print(f"{'':>6}  " + "  ".join(f"{'hit / TTFT vs no-cache':>22}" for _ in names))
     for b in SIZES:
