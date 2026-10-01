@@ -86,16 +86,20 @@ def main():
     ap.add_argument("--warmup", type=int, default=1, help="discarded rounds")
     ap.add_argument("--rounds", type=int, default=7)
     ap.add_argument("--holdout", type=int, default=12)
+    ap.add_argument("--floor", choices=["auto", "on", "off"], default="auto",
+                    help="saturation floor term; auto = on for accelerators, off for cpu")
     ap.add_argument("--refit", help="re-fit and re-plot an existing docs/latency_*.json")
     args = ap.parse_args()
     if args.refit:
         with open(args.refit) as f:
             d = json.load(f)
-        meta = {k: d[k] for k in ("label", "device", "block_size") if k in d}
+        keep = ("label", "device", "block_size", "loadavg_1m_before", "loadavg_1m_after")
+        meta = {k: d[k] for k in keep if k in d}
         meta.setdefault("label", d["model"].get("label", ""))
         meta.setdefault("device", args.refit.split("_")[-1].removesuffix(".json"))
         meta.update(warmup_rounds=d.get("warmup_rounds", d.get("warmup")),
                     rounds=d.get("rounds", d.get("repeats")))
+        meta["floor"] = use_floor(args.floor, meta["device"])
         report(d["grid"], d["heldout"], meta)
         return
 
@@ -136,7 +140,7 @@ def main():
                   f"(IQR {r['prefill_iqr'] * 1e3:5.1f})  gather={r['gather'] * 1e3:6.2f} ms")
 
     label = f"{args.model} {args.device} {args.dtype}"
-    meta = dict(label=label, device=args.device, warmup_rounds=args.warmup,
+    meta = dict(label=label, device=args.device, floor=use_floor(args.floor, args.device), warmup_rounds=args.warmup,
                 rounds=args.rounds, block_size=BS,
                 loadavg_1m_before=load_before[0], loadavg_1m_after=os.getloadavg()[0])
     print(f"host 1-min load average: {load_before[0]:.2f} before, "
@@ -144,10 +148,21 @@ def main():
     report(grid, held, meta)
 
 
+def use_floor(choice, device):
+    """On an accelerator a short forward is bound by host-side kernel dispatch, so
+    time is flat until the device saturates (MPS: floor fit 5.5% vs plain 8.1% error
+    on N<=128). On CPU compute and dispatch share the cores, small-N time keeps
+    growing with C, and the floor over-predicts (11.3% vs 8.9%)."""
+    if choice == "auto":
+        return not device.startswith("cpu")
+    return choice == "on"
+
+
 def report(grid, held, meta):
     """Fit on the grid, check on held-out points, write json + figure."""
+    kw = dict(floor_max_new=2 * BS, linear_min_new=4 * BS) if meta["floor"] else {}
     m = LatencyModel.fit([(r["cached"], r["new"], r["prefill"], r["gather"]) for r in grid],
-                         meta["label"], floor_max_new=2 * BS, linear_min_new=4 * BS)
+                         meta["label"], **kw)
 
     def err(r):
         t = r["prefill"] + r["gather"]
