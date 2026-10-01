@@ -66,11 +66,21 @@ class RadixCache:
 
         Stops early if the pool is full and nothing is evictable.
         """
+        return len(self.insert_nodes(tokens, matched))
+
+    def insert_nodes(self, tokens, matched: list[Node]) -> list[Node]:
+        """Like `insert`, but return the new nodes so a caller can fill their blocks."""
         chunks = self._chunks(tokens)
         node = matched[-1] if matched else self.root
-        added = 0
         fresh: list[Node] = []  # pinned so this request cannot evict its own new blocks
+        walked: list[Node] = []  # existing nodes past `matched`, pinned while we extend them
         for chunk in chunks[len(matched) :]:
+            existing = node.children.get(chunk)
+            if existing is not None:
+                existing.ref_count += 1
+                walked.append(existing)
+                node = existing
+                continue
             block = self._allocate_block()
             if block is None:
                 break
@@ -80,9 +90,9 @@ class RadixCache:
             child.ref_count += 1
             fresh.append(child)
             node = child
-            added += 1
         self.unlock(fresh)
-        return added
+        self.unlock(walked)
+        return fresh
 
     def _allocate_block(self) -> int | None:
         try:
