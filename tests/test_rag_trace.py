@@ -38,3 +38,21 @@ def test_fixed_order_beats_retrieval_order_with_unbounded_cache():
 
     assert hit("canonical") >= hit("retrieval")
     assert hit("popular_first") >= hit("retrieval")
+
+
+def test_trace_from_retrievals_reuses_document_tokens():
+    from prefixlab.rag_trace import generate_rag_trace_from_retrievals
+
+    retrievals = [[0, 1], [1, 0], [2, 0]]
+    doc_lens, query_lens = [20, 30, 40], [3, 4, 5]
+    t = generate_rag_trace_from_retrievals(retrievals, doc_lens, query_lens,
+                                           order="canonical", system_len=8, seed=1)
+    assert len(t) == 3
+    by_len = {len(p): p for p in t}
+    # queries 0 and 1 retrieved the same set; canonical order makes the docs identical
+    assert by_len[8 + 50 + 3][: 8 + 50] == by_len[8 + 50 + 4][: 8 + 50]
+    pf = generate_rag_trace_from_retrievals(retrievals, doc_lens, query_lens,
+                                            order="popular_first", system_len=8, seed=1)
+    # doc 0 is in every retrieval, so it is the most frequent and leads every prompt
+    assert len({tuple(p[8:28]) for p in pf}) == 1
+    assert len({tuple(p[28:48]) for p in pf}) > 1  # what follows it differs

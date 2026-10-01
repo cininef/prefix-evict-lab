@@ -74,3 +74,49 @@ def generate_rag_trace(cfg: RagTraceConfig) -> list[list[int]]:
             prompt += docs[d]
         trace.append(prompt + query)
     return trace
+
+
+def generate_rag_trace_from_retrievals(retrievals, doc_lens, query_lens, order="retrieval",
+                                       system_len=256, num_requests=None, vocab=32000,
+                                       seed=0) -> list[list[int]]:
+    """RAG trace from real retrieval results (see benchmarks/build_real_rag.py).
+
+    retrievals[q] is the ranked list of document ids for query q. Token contents
+    are random but stable per document, so only identity and length carry over.
+    Queries are issued in a random order (one pass, or `num_requests` draws
+    without replacement); real query arrival order is not available.
+    "popular_first" ranks documents by how often they are retrieved over the
+    whole query set, which a live system would have to estimate online.
+    """
+    if order not in ORDERS:
+        raise ValueError(f"order must be one of {ORDERS}")
+    rng = random.Random(seed)
+
+    def rand_tokens(n):
+        return [rng.randrange(vocab) for _ in range(n)]
+
+    system = rand_tokens(system_len)
+    doc_tokens: dict[int, list[int]] = {}
+    freq: dict[int, int] = {}
+    for r in retrievals:
+        for d in r:
+            freq[d] = freq.get(d, 0) + 1
+
+    qs = list(range(len(retrievals)))
+    rng.shuffle(qs)
+    if num_requests is not None:
+        qs = qs[:num_requests]
+    trace = []
+    for q in qs:
+        picked = list(retrievals[q])
+        if order == "canonical":
+            picked.sort()
+        elif order == "popular_first":
+            picked.sort(key=lambda d: (-freq[d], d))
+        prompt = list(system)
+        for d in picked:
+            if d not in doc_tokens:
+                doc_tokens[d] = rand_tokens(doc_lens[d])
+            prompt += doc_tokens[d]
+        trace.append(prompt + rand_tokens(max(1, query_lens[q])))
+    return trace
