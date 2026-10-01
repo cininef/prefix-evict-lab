@@ -22,6 +22,7 @@ class Node:
     last_access: int = 0
     hit_count: int = 0
     created: int = 0
+    seq: int = 0  # unique insertion order; final tie-break between equal priorities
 
 
 class RadixCache:
@@ -33,6 +34,10 @@ class RadixCache:
         self._clock = 0
         self.num_evictions = 0
         self.eviction_ages: list[int] = []  # requests between insert and eviction
+        # Leaves are tracked incrementally: scanning the whole tree on every
+        # eviction was 99% of simulation time on long RAG prompts.
+        self._leaves: set[Node] = set()
+        self._seq = 0
 
     def _chunks(self, tokens):
         bs = self.block_size
@@ -84,9 +89,12 @@ class RadixCache:
             block = self._allocate_block()
             if block is None:
                 break
+            self._seq += 1
             child = Node(key=chunk, parent=node, block=block, depth=node.depth + 1,
-                         last_access=self._clock, created=self._clock)
+                         last_access=self._clock, created=self._clock, seq=self._seq)
             node.children[chunk] = child
+            self._leaves.discard(node)
+            self._leaves.add(child)
             child.ref_count += 1
             fresh.append(child)
             node = child
@@ -103,21 +111,18 @@ class RadixCache:
             return self.allocator.allocate()
 
     def _evictable_leaves(self) -> list[Node]:
-        out, stack = [], [self.root]
-        while stack:
-            n = stack.pop()
-            if n.children:
-                stack.extend(n.children.values())
-            elif n is not self.root and n.ref_count == 0:
-                out.append(n)
-        return out
+        return [n for n in self._leaves if n.ref_count == 0]
 
     def evict_one(self) -> bool:
         leaves = self._evictable_leaves()
         if not leaves:
             return False
-        victim = min(leaves, key=lambda n: self.policy.priority(n, self._clock))
-        del victim.parent.children[victim.key]
+        victim = min(leaves, key=lambda n: (self.policy.priority(n, self._clock), n.seq))
+        parent = victim.parent
+        del parent.children[victim.key]
+        self._leaves.discard(victim)
+        if not parent.children and parent is not self.root:
+            self._leaves.add(parent)
         self.allocator.free(victim.block)
         self.num_evictions += 1
         self.eviction_ages.append(self._clock - victim.created)

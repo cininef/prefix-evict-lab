@@ -82,3 +82,26 @@ def test_insert_does_not_evict_its_own_new_blocks():
         store(c, [9, 9])
     store(c, [1, 2, 3, 4, 5, 6])  # 3 blocks needed, only 2 free + [9,9] evictable
     assert len(c.match_prefix([1, 2, 3, 4])) == 2  # its own leading blocks survived
+
+
+def test_incremental_leaf_set_matches_full_tree_scan():
+    import random
+
+    rng = random.Random(0)
+    cache = RadixCache(40, 4, LFU())
+    heads = [[rng.randrange(50) for _ in range(8)] for _ in range(3)]
+    for _ in range(300):
+        tokens = rng.choice(heads) + [rng.randrange(50) for _ in range(rng.randrange(0, 24))]
+        m = cache.match_prefix(tokens)
+        cache.lock(m)
+        cache.insert(tokens, m)
+        cache.unlock(m)
+        scanned, stack = set(), [cache.root]
+        while stack:
+            n = stack.pop()
+            if n.children:
+                stack.extend(n.children.values())
+            elif n is not cache.root:
+                scanned.add(n)
+        assert cache._leaves == scanned
+    assert cache.num_evictions > 0
