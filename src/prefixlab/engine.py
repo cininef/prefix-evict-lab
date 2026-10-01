@@ -55,7 +55,12 @@ class GenResult:
     tokens: list[int]          # generated token ids
     prompt_len: int
     cached_tokens: int         # prompt tokens served from the pool
-    prefill_seconds: float     # wall time of the suffix prefill (= TTFT minus sampling)
+    prefill_seconds: float     # wall time of the suffix forward pass
+    gather_seconds: float = 0.0  # wall time copying the cached prefix out of the pool
+
+    @property
+    def ttft_seconds(self) -> float:
+        return self.gather_seconds + self.prefill_seconds
 
 
 class PrefixEngine:
@@ -82,10 +87,12 @@ class PrefixEngine:
         self.cache.lock(matched)
         try:
             n_cached = len(matched) * bs
+            self._sync()
+            tg = time.perf_counter()
             past = self.pool.gather([n.block for n in matched]) if matched else DynamicCache()
-
             self._sync()
             t0 = time.perf_counter()
+            gather_s = t0 - tg
             suffix = torch.tensor([prompt[n_cached:]], device=self.device)
             out = self.model(input_ids=suffix, past_key_values=past, use_cache=True)
             self._sync()
@@ -107,4 +114,4 @@ class PrefixEngine:
                 generated.append(nxt)
         finally:
             self.cache.unlock(matched)
-        return GenResult(generated, len(prompt), n_cached, prefill_s)
+        return GenResult(generated, len(prompt), n_cached, prefill_s, gather_s)
