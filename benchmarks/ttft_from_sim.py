@@ -51,7 +51,7 @@ def main():
                 ttft[n][b].append(st.mean(estimated_ttft(trace, r.per_request_hit, lm)) / nocache)
 
     print(f"no-cache mean TTFT: {st.mean(base) * 1e3:.1f} ms   ({lm.label})")
-    print(f"floor-bound best case (every request all-but-one-block cached): "
+    print(f"best case, every request all-but-one-block cached (fixed cost / floor bound): "
           f"{lm.ttft(1, 1) / st.mean(base):.0%} of no-cache\n")
     print(f"{'blocks':>6}  " + "  ".join(f"{n:>22}" for n in names))
     print(f"{'':>6}  " + "  ".join(f"{'hit / TTFT vs no-cache':>22}" for _ in names))
