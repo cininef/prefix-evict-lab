@@ -5,6 +5,8 @@ cache (structural ceiling: no eviction) and with policies x cache sizes, over
 several seeds. Hit rate is priced as TTFT with a measured LatencyModel.
 
     python benchmarks/rag_order.py docs/latency_mps.json [--k 3] [--zipf 1.0]
+    python benchmarks/rag_order.py docs/latency_mps.json --real docs/real_rag_nfcorpus.json \
+        --k 5 --sizes 512,2048,8192 --no-oracle
 Writes docs/rag_order_k<k>_s<zipf>.{png,json}.
 """
 
@@ -16,7 +18,8 @@ from dataclasses import replace
 from prefixlab.latency import LatencyModel, estimated_ttft
 from prefixlab.oracle import BeladyOracle
 from prefixlab.policies import POLICIES
-from prefixlab.rag_trace import ORDERS, RagTraceConfig, generate_rag_trace
+from prefixlab.rag_trace import (ORDERS, RagTraceConfig, generate_rag_trace,
+                                 generate_rag_trace_from_retrievals)
 from prefixlab.radix_cache import RadixCache
 from prefixlab.simulator import simulate
 
@@ -32,7 +35,17 @@ def main():
     ap.add_argument("--zipf", type=float, default=1.0)
     ap.add_argument("--seeds", type=int, default=10)
     ap.add_argument("--no-oracle", action="store_true")
+    ap.add_argument("--real", help="real retrievals json from build_real_rag.py")
+    ap.add_argument("--requests", type=int, help="with --real: queries per seed")
+    ap.add_argument("--sizes", help="comma-separated cache sizes in blocks")
     args = ap.parse_args()
+    global SIZES
+    if args.sizes:
+        SIZES = [int(x) for x in args.sizes.split(",")]
+    real = None
+    if args.real:
+        with open(args.real) as f:
+            real = json.load(f)
     with open(args.latency_json) as f:
         lm = LatencyModel(**json.load(f)["model"])
 
@@ -42,7 +55,13 @@ def main():
     for seed in range(args.seeds):
         for order in ORDERS:
             cfg = RagTraceConfig(k=args.k, zipf_s=args.zipf, order=order, seed=seed)
-            trace = generate_rag_trace(cfg)
+            if real:
+                trace = generate_rag_trace_from_retrievals(
+                    [r[: args.k] for r in real["retrievals"]], real["doc_lens"],
+                    real["query_lens"], order=order, system_len=cfg.system_len,
+                    num_requests=args.requests, seed=seed)
+            else:
+                trace = generate_rag_trace(cfg)
             nocache = st.mean(lm.ttft(0, len(t)) for t in trace)
             for b in SIZES + [UNBOUNDED]:
                 for n in names:
@@ -58,9 +77,11 @@ def main():
                     res[order][n][b].append((r.token_hit_rate, t, doc_hit / doc_tot))
         print(f"seed {seed} done", flush=True)
 
-    tag = f"k{args.k}_s{args.zipf:g}"
+    tag = (f"real_{args.real.split('real_rag_')[-1].removesuffix('.json')}_k{args.k}"
+           if real else f"k{args.k}_s{args.zipf:g}")
     with open(f"docs/rag_order_{tag}.json", "w") as f:
-        json.dump(dict(k=args.k, zipf=args.zipf, seeds=args.seeds, sizes=SIZES,
+        json.dump(dict(k=args.k, zipf=None if real else args.zipf, real=args.real,
+                       requests=args.requests, seeds=args.seeds, sizes=SIZES,
                        latency=lm.label, fields=["hit", "ttft_ratio", "doc_hit"],
                        results={o: {n: {("unbounded" if b == UNBOUNDED else str(b)): v
                                         for b, v in per.items() if v}
@@ -69,7 +90,8 @@ def main():
     def cell(v):
         return "/".join(f"{st.mean(x[i] for x in v):.3f}" for i in range(3))
 
-    print(f"\nRAG k={args.k} zipf={args.zipf}, {args.seeds} seeds; cells are "
+    src = f"real {args.real}" if real else f"zipf={args.zipf}"
+    print(f"\nRAG k={args.k} {src}, {args.seeds} seeds; cells are "
           f"hit/TTFT-ratio/doc-hit ({lm.label})")
     for order in ORDERS:
         ceil = res[order]["lru"][UNBOUNDED]
@@ -98,7 +120,9 @@ def main():
         ax.set_xlabel(f"cache size (blocks of {BS} tokens)")
     axes[0].set_ylabel("token hit rate")
     axes[0].legend(fontsize=8)
-    fig.suptitle(f"Synthetic RAG, k={args.k}, Zipf s={args.zipf}, {args.seeds} seeds", fontsize=10)
+    title = (f"BM25 retrievals ({real['dataset']})" if real
+             else f"Synthetic RAG, Zipf s={args.zipf}")
+    fig.suptitle(f"{title}, k={args.k}, {args.seeds} seeds", fontsize=10)
     fig.tight_layout()
     fig.savefig(f"docs/rag_order_{tag}.png", dpi=150)
 
