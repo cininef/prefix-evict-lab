@@ -133,6 +133,23 @@ ids, and a request prefills only its uncached suffix.
     robust, not a big step. Weak cells left: agent at 64 blocks (-2.3) and
     branch workloads at 1024 blocks (-0.4 to -0.7).
 
+### Measured end to end (M6)
+
+14. **The policy differences hold on the real engine.** Agent trace, 120
+    requests, Qwen2.5-0.5B on MPS, 3 seeds, runs in shuffled order. Mean TTFT
+    change vs LRU, measured (predicted by simulator + latency model):
+
+    | Blocks | LFU | ARCAged |
+    |---:|---:|---:|
+    | 64  | -8.7% (-7.3%) | -3.1% (-3.8%) |
+    | 128 | +1.1% (+3.5%) | -2.2% (-2.0%) |
+    | 256 | +8.0% (+9.8%) | -1.4% (-0.9%) |
+
+    LFU flips from best to worst as the cache grows; ARCAged is faster than LRU
+    at every size. Every run's mean TTFT is within 4.4% of its prediction, the
+    per-size ranking is the same, and the engine's cached tokens equal the
+    simulator's in every run.
+
 **Measurement lessons**, each found because a check failed:
 
 - Repeating one point back to back gave 1-3 ms IQRs, while the same forward
@@ -230,11 +247,12 @@ class MyPolicy:
 ## Roadmap and future investigations
 
 Done: simulator, real-model engine with exact parity, validated latency model,
-agent/RAG workloads including real retrievals, and an adaptive policy. Next:
+agent/RAG workloads including real retrievals, an adaptive policy, and
+per-policy TTFT measured on the real engine. Next:
 
-- **Policies measured end to end (next).** Run LRU, LFU and ARCAged through the
-  real engine under a request stream and compare measured TTFT, not only TTFT
-  priced by the latency model.
+- **End-to-end on more settings.** More seeds, the RAG streams, and a CUDA GPU
+  with a serving-style forward (paged attention, CUDA graphs), where the
+  dispatch floor and therefore the TTFT ceiling will differ.
 - **Closing the oracle gap.** ARCAged is robust but Belady is still 5-13 points
   ahead. Candidates: structure signals (sharing degree, whether a session is
   still live), learned reuse prediction.
