@@ -1,12 +1,17 @@
 """Prefill latency as a function of cached and new tokens, fitted from measurements.
 
-    prefill(C, N) = a + b*N + c*N*(C + N/2)      # forward pass over the N new tokens
-    gather(C)     = g0 + g1*C                    # copying C cached tokens out of the pool
+    prefill(C, N) = max(floor, a + b*N + c*N*(C + N/2))   # forward over N new tokens
+    gather(C)     = g0 + g1*C                             # copying C cached tokens out
 
 b*N covers the per-token work (projections, MLP); c*N*(C + N/2) is attention,
 where each new token attends to every cached token and, on average, half of
-the other new ones. TTFT estimate = gather(C) + prefill(C, N); the gather term
-is the price of a hit and is zero when C == 0.
+the other new ones. `floor` is the latency of a forward pass too small to
+saturate the device (kernel launch overhead per layer dominates); without it
+the linear fit, dominated by long prompts, underestimates short suffixes,
+which is exactly the regime of a multi-turn hit.
+
+TTFT estimate = gather(C) + prefill(C, N); the gather term is the price of a
+hit and is zero when C == 0.
 """
 
 import json
@@ -50,12 +55,14 @@ class LatencyModel:
     c: float
     g0: float = 0.0
     g1: float = 0.0
+    floor: float = 0.0
     r2_prefill: float = float("nan")
     r2_gather: float = float("nan")
     label: str = ""
 
     def prefill(self, cached: int, new: int) -> float:
-        return sum(w * x for w, x in zip((self.a, self.b, self.c), _features(cached, new)))
+        lin = sum(w * x for w, x in zip((self.a, self.b, self.c), _features(cached, new)))
+        return max(self.floor, lin)
 
     def gather(self, cached: int) -> float:
         return self.g0 + self.g1 * cached if cached else 0.0
@@ -64,13 +71,25 @@ class LatencyModel:
         return self.gather(cached) + self.prefill(cached, new)
 
     @classmethod
-    def fit(cls, samples, label: str = "") -> "LatencyModel":
-        """samples: iterable of (cached, new, prefill_s, gather_s)."""
+    def fit(cls, samples, label: str = "", floor_max_new: int | None = None,
+            linear_min_new: int = 0) -> "LatencyModel":
+        """samples: iterable of (cached, new, prefill_s, gather_s).
+
+        With `floor_max_new`, the floor is the median prefill of samples with
+        new <= floor_max_new, and the linear part is fitted on samples with
+        new >= linear_min_new only.
+        """
         samples = list(samples)
-        x = [_features(c, n) for c, n, _, _ in samples]
-        y = [p for _, _, p, _ in samples]
-        a, b, c = _lstsq(x, y)
-        r2p = _r2([sum(w * f for w, f in zip((a, b, c), row)) for row in x], y)
+        lin = [s for s in samples if s[1] >= linear_min_new]
+        x = [_features(c, n) for c, n, _, _ in lin]
+        a, b, c = _lstsq(x, [p for _, _, p, _ in lin])
+        floor = 0.0
+        if floor_max_new is not None:
+            small = sorted(p for _, n, p, _ in samples if n <= floor_max_new)
+            if small:
+                floor = small[len(small) // 2]
+        m = cls(a, b, c, floor=floor, label=label)
+        r2p = _r2([m.prefill(c_, n) for c_, n, _, _ in samples], [p for _, _, p, _ in samples])
 
         hit = [(c, g) for c, _, _, g in samples if c > 0]
         g0 = g1 = 0.0
@@ -78,7 +97,8 @@ class LatencyModel:
         if len({c for c, _ in hit}) >= 2:
             g0, g1 = _lstsq([[1.0, float(c)] for c, _ in hit], [g for _, g in hit])
             r2g = _r2([g0 + g1 * c for c, _ in hit], [g for _, g in hit])
-        return cls(a, b, c, g0, g1, r2p, r2g, label)
+        m.g0, m.g1, m.r2_prefill, m.r2_gather = g0, g1, r2p, r2g
+        return m
 
     def save(self, path) -> None:
         with open(path, "w") as f:

@@ -44,3 +44,18 @@ def test_estimated_ttft_caps_full_hit():
     m = LatencyModel(a=0.0, b=1.0, c=0.0)
     trace = [[0] * 32, [0] * 32]
     assert estimated_ttft(trace, [0, 32], m) == [32.0, 1.0]
+
+
+def test_floor_captures_unsaturated_short_suffixes():
+    # Device saturates above 64 new tokens; below that time is flat at 40 ms.
+    samples = []
+    for total in (256, 512, 1024):
+        for cached in (0, total // 2, total - 64, total - 32, total - 16):
+            new = total - cached
+            p = max(0.040, 0.01 + 2e-4 * new + 3e-8 * new * (cached + new / 2))
+            samples.append((cached, new, p, 0.0))
+    plain = LatencyModel.fit(samples)
+    floored = LatencyModel.fit(samples, floor_max_new=32, linear_min_new=64)
+    assert floored.floor == pytest.approx(0.040)
+    assert floored.prefill(1008, 16) == pytest.approx(0.040)
+    assert abs(floored.prefill(1008, 16) - 0.040) < abs(plain.prefill(1008, 16) - 0.040)
