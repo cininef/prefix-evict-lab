@@ -14,6 +14,7 @@ docs/prefill_latency_<device>.png.
 
 import argparse
 import json
+import os
 import random
 import statistics as st
 import time
@@ -122,6 +123,10 @@ def main():
         if p not in grid_pts and p not in held_pts:
             held_pts.append(p)
     # Grid and held-out points share rounds so both see the same drift.
+    # Short forwards are bound by host-side kernel dispatch: with every core busy,
+    # a 32-token suffix on MPS took +20% while a 1024-token one took +3%. Record
+    # host load so a contaminated run can be spotted.
+    load_before = os.getloadavg()
     res = run_rounds(model, pool, prompt, grid_pts + held_pts, args.rounds, args.warmup, rng)
     grid, held = res[: len(grid_pts)], res[len(grid_pts):]
     for name, rows in (("grid", grid), ("held-out", held)):
@@ -132,7 +137,10 @@ def main():
 
     label = f"{args.model} {args.device} {args.dtype}"
     meta = dict(label=label, device=args.device, warmup_rounds=args.warmup,
-                rounds=args.rounds, block_size=BS)
+                rounds=args.rounds, block_size=BS,
+                loadavg_1m_before=load_before[0], loadavg_1m_after=os.getloadavg()[0])
+    print(f"host 1-min load average: {load_before[0]:.2f} before, "
+          f"{meta['loadavg_1m_after']:.2f} after")
     report(grid, held, meta)
 
 
