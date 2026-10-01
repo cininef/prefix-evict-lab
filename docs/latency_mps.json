@@ -277,9 +277,10 @@
   ],
   "label": "Qwen/Qwen2.5-0.5B-Instruct mps float32",
   "device": "mps",
-  "warmup_rounds": 1,
-  "rounds": 7,
   "block_size": 16,
   "loadavg_1m_before": 7.98681640625,
-  "loadavg_1m_after": 4.8544921875
+  "loadavg_1m_after": 4.8544921875,
+  "warmup_rounds": 1,
+  "rounds": 7,
+  "floor": true
 }
