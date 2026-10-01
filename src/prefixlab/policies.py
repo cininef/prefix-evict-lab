@@ -77,6 +77,8 @@ class ARC:
         self.live = 0
         self.b1: "OrderedDict[int, None]" = OrderedDict()
         self.b2: "OrderedDict[int, None]" = OrderedDict()
+        self.choices = 0
+        self.fallbacks = 0  # preferred list had no evictable leaf
 
     def priority(self, node, now: int) -> tuple:
         return (node.last_access,)
@@ -110,7 +112,10 @@ class ARC:
         t2 = [n for n in leaves if n in self.t2]
         t1_size = self.live - len(self.t2)
         prefer_t1 = t1_size > self.p
-        pool = (t1 if prefer_t1 else t2) or t1 or t2
+        preferred = t1 if prefer_t1 else t2
+        self.choices += 1
+        self.fallbacks += not preferred
+        pool = preferred or t1 or t2
         return min(pool, key=lambda n: (n.last_access, n.seq))
 
 
