@@ -47,6 +47,7 @@ class RadixCache:
         # eviction was 99% of simulation time on long RAG prompts.
         self._leaves: set[Node] = set()
         self._seq = 0
+        self._on_hit = getattr(policy, "on_hit", None)
 
     def _chunks(self, tokens):
         bs = self.block_size
@@ -62,6 +63,8 @@ class RadixCache:
                 break
             child.last_access = self._clock
             child.hit_count += 1
+            if self._on_hit is not None:
+                self._on_hit(child, self._clock)
             path.append(child)
             node = child
         return path
