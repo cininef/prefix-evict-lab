@@ -10,6 +10,14 @@ from dataclasses import dataclass, field
 from .block_allocator import BlockAllocator, OutOfBlocks
 from .policies import EvictionPolicy
 
+ROOT_PID = 0
+
+
+def chain_pid(parent_pid: int, key: tuple) -> int:
+    """Stable id of a cached prefix: hash of (parent prefix id, last block's tokens).
+    Two nodes with the same token path get the same pid, even across evictions."""
+    return hash((parent_pid, key))
+
 
 @dataclass(eq=False)
 class Node:
@@ -23,6 +31,7 @@ class Node:
     hit_count: int = 0
     created: int = 0
     seq: int = 0  # unique insertion order; final tie-break between equal priorities
+    pid: int = ROOT_PID  # prefix id, see chain_pid
 
 
 class RadixCache:
@@ -91,10 +100,13 @@ class RadixCache:
                 break
             self._seq += 1
             child = Node(key=chunk, parent=node, block=block, depth=node.depth + 1,
-                         last_access=self._clock, created=self._clock, seq=self._seq)
+                         last_access=self._clock, created=self._clock, seq=self._seq,
+                         pid=chain_pid(node.pid, chunk))
             node.children[chunk] = child
             self._leaves.discard(node)
             self._leaves.add(child)
+            if hasattr(self.policy, "on_insert"):
+                self.policy.on_insert(child, self._clock)
             child.ref_count += 1
             fresh.append(child)
             node = child
@@ -117,13 +129,18 @@ class RadixCache:
         leaves = self._evictable_leaves()
         if not leaves:
             return False
-        victim = min(leaves, key=lambda n: (self.policy.priority(n, self._clock), n.seq))
+        if hasattr(self.policy, "choose"):
+            victim = self.policy.choose(leaves, self._clock)
+        else:
+            victim = min(leaves, key=lambda n: (self.policy.priority(n, self._clock), n.seq))
         parent = victim.parent
         del parent.children[victim.key]
         self._leaves.discard(victim)
         if not parent.children and parent is not self.root:
             self._leaves.add(parent)
         self.allocator.free(victim.block)
+        if hasattr(self.policy, "on_evict"):
+            self.policy.on_evict(victim, self._clock)
         self.num_evictions += 1
         self.eviction_ages.append(self._clock - victim.created)
         return True

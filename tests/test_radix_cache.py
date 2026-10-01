@@ -105,3 +105,44 @@ def test_incremental_leaf_set_matches_full_tree_scan():
                 scanned.add(n)
         assert cache._leaves == scanned
     assert cache.num_evictions > 0
+
+
+def test_pid_is_stable_across_eviction_and_reinsert():
+    cache = RadixCache(2, 4, LRU())
+    a, b = list(range(8)), list(range(100, 108))
+    for t in (a,):
+        cache.insert(t, cache.match_prefix(t))
+    pids = [n.pid for n in cache.match_prefix(a)]
+    cache.insert(b, cache.match_prefix(b))  # evicts a's two blocks
+    assert cache.match_prefix(a) == []
+    cache.insert(a, [])
+    assert [n.pid for n in cache.match_prefix(a)] == pids
+    assert len(set(pids)) == 2
+
+
+class _Recording(LRU):
+    name = "recording"
+
+    def __init__(self):
+        self.inserted, self.evicted, self.chose = [], [], 0
+
+    def on_insert(self, node, now):
+        self.inserted.append(node.pid)
+
+    def on_evict(self, node, now):
+        self.evicted.append(node.pid)
+
+    def choose(self, leaves, now):
+        self.chose += 1
+        return max(leaves, key=lambda n: n.last_access)  # MRU, to prove it is used
+
+
+def test_policy_hooks_are_called():
+    pol = _Recording()
+    cache = RadixCache(2, 4, pol)
+    a, b = list(range(8)), list(range(100, 104))
+    cache.insert(a, cache.match_prefix(a))
+    cache.insert(b, cache.match_prefix(b))
+    assert len(pol.inserted) == 3 and pol.chose == 1 and len(pol.evicted) == 1
+    # MRU picked a's second block (the only leaf), not LRU order
+    assert pol.evicted[0] == pol.inserted[1]

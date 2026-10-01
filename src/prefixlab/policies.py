@@ -4,6 +4,16 @@ from typing import Protocol
 
 
 class EvictionPolicy(Protocol):
+    """priority(node, now): the evictable leaf with the lowest priority goes first.
+
+    Stateful policies may also define any of these optional hooks, which the
+    cache calls when present:
+      on_insert(node, now)    a new block was cached
+      on_evict(node, now)     a block was evicted
+      choose(leaves, now)     pick the victim among evictable leaves directly,
+                              replacing the min-priority rule
+    """
+
     name: str
 
     def priority(self, node, now: int) -> tuple: ...
