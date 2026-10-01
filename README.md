@@ -45,6 +45,51 @@ error bars are one standard deviation; block size 16 tokens; working set is abou
    (`1 + 0.1 * depth`) is indistinguishable from LFU. A useful cost model has to
    come from measured recompute time.
 
+### From hit rate to TTFT (real model)
+
+The same cache now drives a real model (Qwen2.5-0.5B-Instruct, fp32, batch 1):
+the KV tensors of every cached block live in a pool indexed by the tree's block
+ids, and a request prefills only its uncached suffix.
+
+4. **Prefix reuse is exact.** Greedy output with reused KV matches plain HF
+   `generate` token for token (6/6 multi-turn replies, also with a 14-block pool
+   that forces eviction; tiny-model parity tests run in CI).
+5. **A fitted latency model predicts real TTFT within a few percent.**
+   `prefill(C, N) = max(floor, a + b*N + c*N*(C + N/2))` for C cached and N new
+   tokens, plus a gather cost for copying the hit out of the pool. On Apple MPS:
+   held-out error 7% mean; on a 120-request stream through the real engine, mean
+   TTFT is predicted within +3.5% and the engine's cached tokens equal the
+   simulator's on every request.
+
+![prefill latency](docs/prefill_latency_mps.png)
+
+6. **The TTFT benefit is capped well before hit rate saturates.** A short
+   forward on MPS costs ~38 ms no matter how few tokens it computes (host-side
+   kernel dispatch), so even if every request hit all but its last block, mean
+   TTFT on this trace would only fall to ~29% of no-cache. Hit rate 0.81 -> 0.86
+   moves TTFT only 0.36 -> 0.32.
+7. **Mid-size policy gaps survive as latency.** At 128 blocks the oracle's +13
+   point hit rate over LRU is 19% lower TTFT (0.449 vs 0.555 of no-cache); at 256
+   blocks LRU beats LFU by 10%. The M1 ranking is unchanged.
+8. **Recompute cost is nearly flat in depth at this scale.** Per 16-token block,
+   cost(d) ~ 1 + 0.004*d (MPS), so the guessed `1 + 0.1*depth` overweights depth
+   about 25x. Eviction value here is mostly reuse probability, not recompute cost.
+
+![TTFT vs cache size](docs/ttft_vs_cache_mps.png)
+
+**Measurement lessons**, each found because a check failed:
+
+- Repeating one point back to back gave 1-3 ms IQRs, while the same forward
+  differed by 13% a minute later. Points are now measured in shuffled rounds.
+- The first MPS fit over-predicted stream TTFT by 13%. Not thermal (3 min of full
+  load changed nothing), not interference from a preceding large forward: short
+  forwards are dispatch-bound and slowed by host CPU load (+20% at N=32 with all
+  cores busy, +3% at N=1024). The run had a busy host; load average is now logged.
+- The floor is a property of accelerators. On CPU there is no flat region and a
+  plain linear fit is better (8.9% vs 11.3% error on short suffixes).
+- HF `generate` merges Qwen's `repetition_penalty=1.1` even with
+  `do_sample=False`, which made even uncached requests "fail" parity.
+
 **A bug the benchmark exposed.** An earlier version did not pin a request's newly
 inserted blocks, so frequency-based policies evicted them mid-insert. LFU and
 cost-aware looked far worse than LRU (0.28 / 0.09 vs 0.57 at 128 blocks) until
@@ -78,7 +123,11 @@ this was fixed. The regression test is
    └───────────────────────────┘
 
  evaluate.py: sweep policies x cache sizes x seeds -> mean and std
- (D, planned) real-model engine: the same cache holds actual KV tensors
+ engine.py (D): KVPool [layers, blocks, kv_heads, block, head_dim] indexed by
+   the tree's block ids; PrefixEngine gathers the hit, prefills the suffix,
+   scatters new blocks, decodes greedily
+ latency.py: prefill/gather model fitted from engine measurements; prices a
+   simulated run as TTFT
 ```
 
 Design notes:
@@ -99,9 +148,15 @@ Design notes:
 git clone https://github.com/cininef/prefix-evict-lab
 cd prefix-evict-lab
 pip install -e ".[dev]"
-pytest                                   # 19 tests
+pytest                                   # 28 tests (engine parity needs .[model])
 python benchmarks/compare_policies.py    # one trace, several cache sizes
 python benchmarks/multi_seed.py          # 10 seeds + oracle, writes the figure
+
+pip install -e ".[dev,model]"            # torch + transformers
+python benchmarks/real_model_parity.py                    # reuse == HF greedy
+python benchmarks/prefill_latency.py --device mps         # measure + fit (~6 min)
+python benchmarks/validate_latency_e2e.py docs/latency_mps.json --device mps
+python benchmarks/ttft_from_sim.py docs/latency_mps.json  # hit rate -> TTFT
 ```
 
 Add a policy:
@@ -115,20 +170,23 @@ class MyPolicy:
 
 ## Roadmap and future investigations
 
-The simulator is complete for offline evaluation. Future work bridges the gap
-between logical cache behavior and serving latency:
+The simulator, a real-model engine with exact parity, and a validated latency
+model are done. Next:
 
-- **End-to-end latency.** Put a real causal LM (for example Qwen2.5-0.5B) behind
-  the cache, check greedy-decoding parity with plain generation, and measure real
-  TTFT so hit rate can be converted into latency.
-- **Broader workloads.** RAG with Zipf-popular documents, branching and
+- **Broader workloads (next).** RAG with Zipf-popular documents, branching and
   multi-agent trees, long-context coding agents, and tool-calling agents whose
   sessions pause while waiting for a tool. The pause case is an open hypothesis:
   a policy that models expected resume time may keep blocks that LRU evicts.
-- **Structure-aware eviction.** Use tree topology (depth, sharing degree, subtree
-  size) and measured recompute cost as signals; try segmented (SLRU/2Q-style)
+  For RAG, prefix caching only reuses a document if everything before it is
+  identical, so the order of retrieved documents should matter a lot; this is
+  the first thing to measure.
+- **Structure-aware eviction.** Use tree topology (sharing degree, subtree size,
+  session liveness) to predict reuse, since measured recompute cost is nearly
+  flat; try segmented (SLRU/2Q-style)
   and adaptive recency/frequency policies, and measure how much of the gap to the
   oracle they close.
+- **Policies measured end to end** on the real engine, not only priced by the
+  latency model.
 
 Tiered KV offload, non-prefix KV reuse for RAG chunks, prefix-aware routing and
 prefill/decode disaggregation are related directions that change what "evict"
@@ -136,7 +194,13 @@ means; they are out of scope here.
 
 ## Limitations
 
-- All numbers come from a **simulator on a synthetic trace**. Hit rate is not TTFT.
+- Policy results come from a **simulator on a synthetic trace**, priced as TTFT
+  by a latency model validated on one 120-request stream. They are not yet
+  measured end to end per policy.
+- The engine is batch 1 on a plain HF forward (no paged-attention kernel, no
+  CUDA graphs), 0.5B parameters, on a laptop (MPS and CPU). The dispatch-bound
+  floor is specific to this setup; a serving stack on a datacenter GPU will have
+  different constants and possibly a different shape.
 - The trace generator is my own; real agent traffic may differ (no Zipf
   popularity, no tool-call pauses yet).
 - The tree is block-granular, not SGLang's compressed radix tree.
@@ -156,10 +220,12 @@ list only the references I am sure of and do not cite the rest from memory.
 ## Repository layout
 
 ```
-src/prefixlab/   block_allocator, radix_cache, policies, oracle, trace, simulator, evaluate
-tests/           19 unit tests
-benchmarks/      compare_policies.py, multi_seed.py
-docs/            hit_rate_vs_cache.png
+src/prefixlab/   block_allocator, radix_cache, policies, oracle, trace, simulator, evaluate,
+                 engine (real-model KV pool + prefix reuse), latency (fitted TTFT model)
+tests/           28 tests (incl. HF greedy parity on a tiny Qwen2)
+benchmarks/      compare_policies, multi_seed, real_model_parity, prefill_latency,
+                 validate_latency_e2e, ttft_from_sim
+docs/            figures; latency_{mps,cpu}.json (fits + raw points)
 ```
 
 ## License
