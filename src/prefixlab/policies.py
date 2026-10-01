@@ -119,4 +119,52 @@ class ARC:
         return min(pool, key=lambda n: (n.last_access, n.seq))
 
 
-POLICIES = {"lru": LRU, "lfu": LFU, "cost_aware": CostAware, "arc": ARC}
+class ARCAged(ARC):
+    """ARC whose T2 victim is chosen by recent popularity, then recency.
+
+    Plain ARC orders T2 by recency only, so a system-prompt block reused ~100
+    times goes as easily as one reused once whenever it is briefly a leaf; at
+    64 blocks on the agent trace that cost 4.6 points against LFU. Ordering T2
+    by raw hit count fixes small caches but brings back LFU's staleness at
+    large ones. Here each block keeps an exponentially decayed hit score with
+    half-life `half_life` requests, and T2 is ordered by (log2 bucket of the
+    score, last access). Half-life 20 was picked on the agent, branch and
+    Zipf-RAG (retrieval order) traces; longer half-lives lose at large caches
+    (agent 512 blocks: -0.3 / -0.7 / -1.6 points at 20 / 50 / 200).
+    """
+
+    name = "arc_aged"
+
+    def __init__(self, half_life: float = 20.0):
+        super().__init__()
+        self.half_life = half_life
+        self.score: dict = {}  # node -> (score at time t, t)
+
+    def _decayed(self, node, now: int) -> float:
+        sc, t = self.score.get(node, (0.0, now))
+        return sc * 2.0 ** (-(now - t) / self.half_life)
+
+    def on_hit(self, node, now: int) -> None:
+        super().on_hit(node, now)
+        self.score[node] = (self._decayed(node, now) + 1.0, now)
+
+    def on_evict(self, node, now: int) -> None:
+        self.score.pop(node, None)
+        super().on_evict(node, now)
+
+    def choose(self, leaves, now: int):
+        if self.c == 0:
+            self.c = self.live
+        t1 = [n for n in leaves if n not in self.t2]
+        t2 = [n for n in leaves if n in self.t2]
+        preferred = t1 if self.live - len(self.t2) > self.p else t2
+        self.choices += 1
+        self.fallbacks += not preferred
+        pool = preferred or t1 or t2
+        if pool is t2:
+            return min(pool, key=lambda n: (int(self._decayed(n, now) + 1).bit_length(),
+                                            n.last_access, n.seq))
+        return min(pool, key=lambda n: (n.last_access, n.seq))
+
+
+POLICIES = {"lru": LRU, "lfu": LFU, "cost_aware": CostAware, "arc": ARC, "arc_aged": ARCAged}

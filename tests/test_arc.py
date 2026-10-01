@@ -46,3 +46,29 @@ def test_arc_grows_t1_target_on_recency_workload():
     simulate(trace, RadixCache(40, BS, arc))
     assert arc.p > 0
     assert arc.c == 40
+
+
+def test_arc_aged_protects_a_hot_prefix_that_plain_arc_drops():
+    # Agent trace at 64 blocks: 3 system prompts take 48 blocks. A prompt block
+    # is briefly a leaf whenever its sessions' tails are evicted, and recency
+    # alone lets it go despite its many hits.
+    from dataclasses import replace
+
+    from prefixlab.policies import ARCAged
+    from prefixlab.trace import TraceConfig, generate_trace
+
+    t = generate_trace(replace(TraceConfig(), seed=0))
+    arc = simulate(t, RadixCache(64, 16, ARC())).token_hit_rate
+    aged = simulate(t, RadixCache(64, 16, ARCAged())).token_hit_rate
+    assert aged > arc + 0.01
+
+
+def test_arc_aged_score_decays():
+    from prefixlab.policies import ARCAged
+    from prefixlab.radix_cache import Node
+
+    pol, n = ARCAged(half_life=10), Node(key=(), parent=None)
+    pol.on_hit(n, 0)
+    pol.on_hit(n, 0)
+    assert pol._decayed(n, 0) == 2.0
+    assert abs(pol._decayed(n, 10) - 1.0) < 1e-9
